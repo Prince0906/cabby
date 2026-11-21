@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# S0: register the app host as a self-hosted GitHub Actions runner (label: lab-app, from
-# contracts/runtime.yaml), so the CD workflow can deploy with the host's instance profile.
+# S0/S1: register a host as a self-hosted GitHub Actions runner (label lab-<role>, as in
+# contracts/runtime.yaml), so deploy workflows can run there with the host's instance profile.
 #
-#   scripts/register-runner.sh
+#   scripts/register-runner.sh [app|platform|llm]      (default: app)
 #
 # Decision (decisions/): the runner uses the host's instance profile (LabInstanceProfile), so no AWS
 # credentials are stored in GitHub. Jobs on it get short-lived credentials from the instance metadata.
@@ -21,7 +21,9 @@ set -euo pipefail
 export AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 AWS_PAGER=""
 
 here="$(cd "$(dirname "$0")" && pwd)"
-label=lab-app
+role=${1:-app}
+case "$role" in app | platform | llm) ;; *) echo "usage: $0 [app|platform|llm]" >&2; exit 2 ;; esac
+label="lab-$role"
 
 repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 policy=$(gh api "repos/$repo/actions/permissions/fork-pr-contributor-approval" -q .approval_policy)
@@ -31,7 +33,7 @@ policy=$(gh api "repos/$repo/actions/permissions/fork-pr-contributor-approval" -
   exit 1
 }
 
-instance=$(terraform -chdir="$here/../infra/live" output -raw app_instance_id)
+instance=$(terraform -chdir="$here/../infra/live" output -raw "${role}_instance_id")
 aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$instance" \
   --query 'InstanceInformationList[0].PingStatus' --output text | grep -qx Online ||
   { echo "$instance is not Online in SSM (is the lab session running?)" >&2; exit 1; }
