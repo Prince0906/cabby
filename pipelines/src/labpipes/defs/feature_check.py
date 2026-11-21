@@ -121,6 +121,25 @@ def value_problems(contract: dict, row: dict) -> list[str]:
     return problems
 
 
+def actual_columns(redshift: RedshiftData, contract: dict) -> list[dict]:
+    """The feature table's columns as Redshift reports them (svv_columns)."""
+    schema, table = contract["table"].split(".")
+    return redshift.query(
+        "select column_name, data_type, character_maximum_length from svv_columns "
+        f"where table_schema = '{_ident(schema)}' and table_name = '{_ident(table)}' order by ordinal_position"
+    )
+
+
+def months_problems(redshift: RedshiftData, contract: dict, months: list[str]) -> list[str]:
+    """The whole contract (columns once, then values) for several months. training_set calls this: a
+    blocking check only stops steps of its own run, so a month whose ingest run failed the check still has
+    rows in the table, and training must not read them."""
+    problems = column_problems(contract, actual_columns(redshift, contract))
+    if problems:
+        return problems
+    return [f"{m}: {p}" for m in months for p in value_problems(contract, redshift.query(value_sql(contract, check_month(m)))[0])]
+
+
 @dg.asset_check(
     asset=trip_features,
     partitions_def=trip_months,
@@ -130,11 +149,7 @@ def value_problems(contract: dict, row: dict) -> list[str]:
 def feature_contract(context: dg.AssetCheckExecutionContext, redshift: RedshiftData) -> dg.AssetCheckResult:
     month = check_month(context.partition_key)
     contract = features_contract()
-    schema, table = contract["table"].split(".")
-    actual = redshift.query(
-        "select column_name, data_type, character_maximum_length from svv_columns "
-        f"where table_schema = '{_ident(schema)}' and table_name = '{_ident(table)}' order by ordinal_position"
-    )
+    actual = actual_columns(redshift, contract)
     problems = column_problems(contract, actual)
     if not problems:  # values only make sense once the columns are right
         problems = value_problems(contract, redshift.query(value_sql(contract, month))[0])
