@@ -5,8 +5,9 @@ the month to the trip_months partitions and request a run that goes from trip_fi
 Patterns: pipelines/reference/patterns.py.
 
 Design:
-- ONE run per month covers trip_files, the schema check, raw_trips, stg_trips, the quality checks and
-  zone_hour_stats. A blocking check only stops steps of its own run, so splitting the chain into several
+- ONE run per month covers trip_files, the schema check, raw_trips, stg_trips, the quality checks,
+  zone_hour_stats and (S2) trip_features with its feature_contract check. Features come after the
+  staging checks, so a month that fails a blocking check never reaches the model's training data. A blocking check only stops steps of its own run, so splitting the chain into several
   runs would make "blocking" block nothing.
 - "Appears or changes": the cursor remembers each month's ETag. A new month has no entry; a re-uploaded
   month has a different ETag. The run_key is month:etag, so Dagster ignores a repeated request for the
@@ -30,8 +31,8 @@ from ..resources import DataBucket
 
 ingest_month = dg.define_asset_job(
     "ingest_month",
-    selection=dg.AssetSelection.assets("taxi_zones", "trip_files", "raw_trips", "stg_trips", "zone_hour_stats"),
-    description="One month, end to end: footer, schema check, COPY, staging, quality checks, then the mart.",
+    selection=dg.AssetSelection.assets("taxi_zones", "trip_files", "raw_trips", "stg_trips", "zone_hour_stats", "trip_features"),
+    description="One month, end to end: footer, schema check, COPY, staging, quality checks, the mart, then the model features (S2).",
 )
 
 
