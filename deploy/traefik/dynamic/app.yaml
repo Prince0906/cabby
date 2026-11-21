@@ -1,8 +1,9 @@
-# Every request goes to the app service. S3 adds weighted services for blue-green here.
+# Every request goes to the app service, except /metrics: that is for Alloy on the Docker network (S5),
+# never for the public entrypoint. S3 adds weighted services for blue-green here.
 http:
   routers:
     app:
-      rule: PathPrefix(`/`)
+      rule: PathPrefix(`/`) && !PathPrefix(`/metrics`)
       entryPoints: [web]
       service: app
   services:
