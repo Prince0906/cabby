@@ -1,46 +1,45 @@
-# 014: Drop container filesystem counters, node_exporter's own metrics and Docker's virtual network devices
+# 014: Send only a keep-list of host and container metrics; keep the services whole
 
 Stage: S5 · Date: 2026-11-22 · Author: Prince0906 · Drafted by agent: yes (the choice is the author's; rewrite the reasoning in your own words, you will be asked to defend it)
 
 ## Choice
 
-`observability/alloy/budget.alloy` drops three things and keeps everything else:
+`observability/alloy/budget.alloy` sends only the series a dashboard, an SLO or an incident would read:
 
-| Block | Dropped | Why |
+| Block | Kept | Also |
 |---|---|---|
-| `containers` | `container_fs_.*` (about 16 families, 37-44 series each) | per-container filesystem counters; nothing in the dashboard or an SLO reads them |
-| `host` | `node_scrape_collector_.*` (46 per host) | node_exporter reporting on itself |
-| `host` | `node_network_.*` with `device` matching `veth.*`, `br-.*`, `docker0` | Docker gives each container a veth with a random name, so every deploy mints new series |
-| `services` | nothing | the app, serving and Traefik are about 330 series, and they are what the dashboard, SLOs and S8 canary read |
+| `host` | `up`, `node_cpu_seconds_total`, `node_memory_MemAvailable_bytes`, `node_memory_MemTotal_bytes`, `node_filesystem_avail_bytes`, `node_filesystem_size_bytes`, `node_load1`, `node_network_receive_bytes_total`, `node_network_transmit_bytes_total` | drops the `veth*`, `br-*` and `docker0` network devices first |
+| `containers` | `up`, `container_memory_working_set_bytes`, `container_cpu_usage_seconds_total`, `container_start_time_seconds` | drops the labels `id` and `image` |
+| `services` | everything (the app, serving and Traefik, about 330 series) | nothing dropped |
 
-Kept on purpose: every `lab_*` and `traefik_*` series, `node_cpu_seconds_total`, and
-`container_memory_working_set_bytes` (the dashboard's).
+A `keep` rule drops every series whose name does not match, so a new metric family is not sent until it is
+added to the list.
 
 ## Rejected alternative
 
-**An allowlist: keep only the nine metrics the dashboard uses, plus `lab_*`.** It would bring the count to
-roughly 600-900. But when something unexpected happens (a disk filling, a container restarting in a loop) I would
-have almost nothing to look at, and I cannot know today what an incident will need. I also considered dropping
-only the veth devices (about 3,000 series left): it stops the deploy churn but keeps hundreds of series nobody
-reads.
+**Drop only the noise I could see** (`container_fs_*`, `node_scrape_collector_*` and the veth devices: my first
+version of this record). It gave about 1,790 series, 18% of the budget, and it worked. But it leaves the other
+hundreds of metric names nobody reads, and any new family a library adds would be sent without anyone choosing
+it. I also considered keeping only the nine metrics the dashboard uses: too little to debug with.
 
 ## Why
 
-- Before any rule, the two hosts sent 3,337 series (Explore: `count by (host, job)`). 90% came from cAdvisor and
-  node_exporter, and about 10% from the lab's own services.
-- The biggest single block was `container_fs_*`: at least 569 of the app host's 894 cAdvisor series came from
-  15 of its families alone.
-- The S6 LLM host will add roughly 1,500 more (my estimate), and S8's canary adds series per model version. The
-  free tier is 10,000 for all hosts.
-- The label that changes on every deploy is the veth device name (and container ids in cAdvisor); dropping the
-  veth series removes the main source of churn.
-- Cost of this choice: I lose per-container disk I/O. A full disk would show on the host's filesystem metrics
-  (kept), not per container.
+- Before any rule the two hosts sent 3,337 series; 90% came from cAdvisor and node_exporter, and about 10% from
+  the lab's own services. After the first version it was about 1,790, and Grafana listed 467 metric names, most
+  of which I would never open.
+- The keep-list is what a person needs to answer "is it up, is it busy, is it out of memory or disk, did a
+  container restart": the metrics the dashboard reads, plus CPU, load and network totals.
+- `id` and `image` change on every deploy (the cgroup path and the image tag), so dropping them stops each
+  deploy from minting new container series. `name` stays the same and is the only label the dashboard reads.
+- The veth devices are dropped before the keep-list because the network totals are kept for every device left.
+- The S6 LLM host adds roughly 1,500 series without this rule (my estimate), and S8's canary adds series per
+  model version; the free tier is 10,000 for all hosts together.
+- Cost of this choice: a metric I did not list is gone, for example a container's disk I/O or TCP statistics.
+  Adding it back is one edit and a redeploy.
 
 ## What would show this was wrong
 
-- After the three deploys that step 3 asks for, the count is still growing with each deploy: another label
-  changes per deploy, and it needs a `labeldrop`.
-- An incident where the answer was in a dropped family (a container's disk writes, a veth's errors).
-- The count after the rules is far from my estimate of 1,700-1,900, which would mean I misjudged what is in the
-  families I never looked at (the other ~400 series of the app host's node_exporter).
+- An incident where the answer was in a dropped family, and I could not see it.
+- After the three deploys that S5 step 3 asks for, the count still grows with each deploy: another label changes
+  per deploy and needs a `labeldrop`.
+- A dashboard panel or an SLO that goes empty after this change: a metric or label it needs is not on the list.

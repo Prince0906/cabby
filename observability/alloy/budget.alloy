@@ -6,9 +6,10 @@
 //   rule { source_labels = ["__name__"]  regex = "node_(cpu|memory)_.*"  action = "keep" }
 //   rule { regex = "id"  action = "labeldrop" }
 //
-// Decision 014 (option B, "moderate trim"): keep every lab_* and traefik_* series and what the dashboard
-// and the SLOs read; drop the families nobody looks at and the labels that change on every deploy.
-// An action = "drop" rule removes a series when its source labels, joined with ";", match the regex.
+// Decision 014 (a keep-only list for the host and the containers): send only the series a dashboard, an SLO
+// or an incident would read. A "keep" rule drops every series whose name does not match, so a new metric
+// family is not sent until it is added here. The services (the app, serving, Traefik) are kept whole.
+// Rules run in order, top to bottom.
 
 declare "host" {
 	argument "forward_to" { }
@@ -16,19 +17,20 @@ declare "host" {
 	prometheus.relabel "rules" {
 		forward_to = argument.forward_to.value
 
-		// node_exporter reporting on itself (46 series per host): not about the lab.
-		rule {
-			source_labels = ["__name__"]
-			regex         = "node_scrape_collector_.*"
-			action        = "drop"
-		}
-
 		// Docker's virtual network devices. Each container gets a veth with a random name, so every
-		// deploy mints a new set of series. eth0 and lo stay: they show the host's real traffic.
+		// deploy would mint a new set of series. This runs before the keep list because the network
+		// totals below are kept for every device that is left (eth0, lo).
 		rule {
 			source_labels = ["__name__", "device"]
 			regex         = "node_network_.*;(veth.*|br-.*|docker0)"
 			action        = "drop"
+		}
+
+		// Keep only: whether the target answered (up), CPU, memory, disk space, load, and network totals.
+		rule {
+			source_labels = ["__name__"]
+			regex         = "up|node_cpu_seconds_total|node_memory_MemAvailable_bytes|node_memory_MemTotal_bytes|node_filesystem_avail_bytes|node_filesystem_size_bytes|node_load1|node_network_receive_bytes_total|node_network_transmit_bytes_total"
+			action        = "keep"
 		}
 	}
 
@@ -43,12 +45,20 @@ declare "containers" {
 	prometheus.relabel "rules" {
 		forward_to = argument.forward_to.value
 
-		// Per-container filesystem counters: about 16 families of 37-44 series each, and neither the
-		// dashboard nor an SLO reads them. container_memory_working_set_bytes (the dashboard's) stays.
+		// Keep only: whether cAdvisor answered (up), memory (the dashboard's), CPU, and the start time
+		// (a changed start time means a restart).
 		rule {
 			source_labels = ["__name__"]
-			regex         = "container_fs_.*"
-			action        = "drop"
+			regex         = "up|container_memory_working_set_bytes|container_cpu_usage_seconds_total|container_start_time_seconds"
+			action        = "keep"
+		}
+
+		// `id` is the container's cgroup path and `image` carries the image tag: both change on every
+		// deploy and would mint a new series each time. `name` (lab-app-app-blue-1 and so on) stays the
+		// same, and it is the only one the dashboard reads.
+		rule {
+			regex  = "id|image"
+			action = "labeldrop"
 		}
 	}
 
