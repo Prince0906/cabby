@@ -30,3 +30,14 @@ def test_chunk_sizes_are_decision_015_and_valid():
 
 def test_vector_literal_is_pgvectors_text_form():
     assert vector_literal([0.5, -1.0, 2.25]) == "[0.5,-1,2.25]"
+
+
+# S7: the read-only user's privilege check (no database).
+def test_read_only_means_select_on_the_mart_and_nothing_else():
+    from labpipes.defs.mcp_reader import is_read_only
+
+    ok = {"read_mart": "true", "insert_mart": "false", "delete_mart": "false", "create_in_marts": "false", "use_ingest": "false", "use_staging": "false"}
+    assert is_read_only(ok)
+    assert not is_read_only(ok | {"read_mart": "false"})
+    for k in ("insert_mart", "delete_mart", "create_in_marts", "use_ingest", "use_staging"):
+        assert not is_read_only(ok | {k: "true"}), k

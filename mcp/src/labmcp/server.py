@@ -13,6 +13,7 @@ A tool that fails raises; the client sees an error result with the message, neve
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import difflib
 import os
@@ -88,6 +89,21 @@ class Warehouse:
         return [dict(zip(cols, (next(iter(v.values())) if not v.get("isNull") else None for v in rec), strict=True)) for rec in res["Records"]]
 
 
+ZONE_STATS_SQL = (
+    "select zone, pickup_hour, trip_count, median_duration_min, p90_duration_min, first_month, last_month "
+    "from marts.zone_hour_stats where pickup_zone_id = :zone_id order by pickup_hour"
+)
+ZONE_STATS_HOUR_SQL = (
+    "select zone, pickup_hour, trip_count, median_duration_min, p90_duration_min, first_month, last_month "
+    "from marts.zone_hour_stats where pickup_zone_id = :zone_id and pickup_hour = :hour"
+)
+
+
+@cache
+def warehouse() -> Warehouse:
+    return Warehouse()
+
+
 @mcp.tool(description="Version, training window and evaluation metrics of the model currently serving predictions.")
 async def get_model_info() -> dict:
     m = await champion("GET", "/model")
@@ -104,12 +120,29 @@ Metric = Literal["trip_count", "median_duration_min", "p90_duration_min"]
 
 @mcp.tool(description="Predict the duration in minutes of a yellow-taxi trip between two NYC TLC taxi zones, using the champion model.")
 async def predict_duration(pickup_zone: Zone, dropoff_zone: Zone, hour: Hour, day_of_week: Day) -> dict:
-    raise NotImplementedError("S7: predict_duration isn't built yet")
+    # Names become TLC ids here (an unknown name raises with suggestions); the model sees only the four
+    # integers of contracts/features.yaml, with pickup_dow 0 = Sunday. est_distance_miles is left out: the
+    # model fills it from the zone pair.
+    body = {"pickup_zone_id": zone_id(pickup_zone), "dropoff_zone_id": zone_id(dropoff_zone),
+            "pickup_hour": hour, "pickup_dow": DAYS.index(day_of_week)}
+    out = await champion("POST", "/predict", body)
+    return {"duration_minutes": out["duration_minutes"], "pickup_zone": pickup_zone, "dropoff_zone": dropoff_zone,
+            "hour": hour, "day_of_week": day_of_week, "model": out["model"]}
 
 
 @mcp.tool(description="Historical trip statistics for one pickup zone from the zone_hour_stats mart.")
-def query_zone_stats(zone: Zone, metric: Metric, hour: Annotated[int | None, Field(ge=0, le=23, description="Optional: restrict to one pickup hour.")] = None) -> dict:
-    raise NotImplementedError("S7: query_zone_stats isn't built yet")
+async def query_zone_stats(zone: Zone, metric: Metric, hour: Annotated[int | None, Field(ge=0, le=23, description="Optional: restrict to one pickup hour.")] = None) -> dict:
+    # Both statements are constants. The caller's values (a zone id from the bundled list, an hour the schema
+    # bounds to 0..23) travel only as named parameters, and `metric` is a Literal that picks a key in Python,
+    # never a column name in SQL.
+    sql = ZONE_STATS_SQL if hour is None else ZONE_STATS_HOUR_SQL
+    params: dict[str, object] = {"zone_id": zone_id(zone)} | ({} if hour is None else {"hour": hour})
+    rows = await asyncio.to_thread(warehouse().query, sql, params)
+    if not rows:
+        raise ValueError(f"no statistics for zone {zone!r}" + ("" if hour is None else f" at hour {hour}"))
+    values = {int(r["pickup_hour"]): r[metric] for r in rows}
+    out: dict = {"zone": rows[0]["zone"], "metric": metric, "covers": f"{rows[0]['first_month']}..{rows[0]['last_month']}"}
+    return out | ({"by_hour": values} if hour is None else {"hour": hour, "value": values[hour]})
 
 
 @mcp.custom_route("/healthz", methods=["GET"])
