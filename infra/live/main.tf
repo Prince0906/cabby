@@ -70,3 +70,11 @@ module "wiki_secret" {
   name        = "lab/wiki"
   description = "Ops wiki URL and per-student token (S6)"
 }
+
+# An empty container for Grafana Cloud's remote-write URL, user and token (S5). The value is added from the
+# laptop with `aws secretsmanager put-secret-value`, so it never sits in Terraform state or GitHub.
+module "grafana_secret" {
+  source      = "../modules/secret"
+  name        = "lab/grafana"
+  description = "Grafana Cloud remote-write url, user and token (S5)"
+}
