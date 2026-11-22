@@ -78,3 +78,12 @@ module "grafana_secret" {
   name        = "lab/grafana"
   description = "Grafana Cloud remote-write url, user and token (S5)"
 }
+
+# An empty container for Langfuse Cloud's host and project keys (S6). The value is added from the laptop with
+# `aws secretsmanager put-secret-value`, so it never sits in Terraform state or GitHub. deploy/web.sh copies it
+# into the app's /secrets/langfuse.json at every deploy.
+module "langfuse_secret" {
+  source      = "../modules/secret"
+  name        = "lab/langfuse"
+  description = "Langfuse Cloud host, public key and secret key for tracing (S6)"
+}
