@@ -99,3 +99,15 @@ def test_tracing_when_configured(fake_llm, monkeypatch, tmp_path):
     assert all(s["parentSpanId"] == root["spanId"] for s in spans[:-1])
     assert attrs[1]["gen_ai.usage.input_tokens"] == "300" and attrs[1]["gen_ai.usage.output_tokens"] == "9"
     assert attrs[2]["langfuse.trace.name"] == "assist" and "Harbor Line" in attrs[2]["langfuse.observation.input"]
+
+
+# S6, my own tests: the prompt keeps a fixed prefix and puts the excerpts and the question in the user turn.
+def test_prompt_prefix_is_fixed_and_excerpts_go_in_the_user_turn():
+    from rideapp import assistant as a
+
+    c = a.Chunk(id="c1", page_id="harbor-line", title="Harbor Line surcharge", content="It is $4.50.", score=0.9)
+    with_wiki = a.build_messages("Why the extra fee?", [c])
+    without = a.build_messages("Why the extra fee?", [])
+    assert with_wiki[0] == without[0] == {"role": "system", "content": a.SYSTEM_PROMPT}
+    assert "[1] (page: Harbor Line surcharge)" in with_wiki[1]["content"] and "Why the extra fee?" in with_wiki[1]["content"]
+    assert without[1]["content"] == "Why the extra fee?"
