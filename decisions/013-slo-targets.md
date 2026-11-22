@@ -34,6 +34,15 @@ gap or a few minutes of serving trouble would use most of it.
 - Cost of this choice: with no traffic the ratios have no value, so a total outage with zero requests does not
   page. `health.sh` and the status workflow have to catch that.
 
+## Evidence from the break test (2026-11-22)
+
+I stopped `serving-champion` at 12:21:39 UTC while sending one `/predict` a second. The app answered from the
+fallback within 3 seconds. The Availability and Latency panels stayed at 100.00% the whole time (every answer
+was a fast 200). The Model-answered panel fell to 27.29% (1 h window) and `PredictFallbackFastBurn` was firing
+by about 12:29 UTC, so about 7 to 8 minutes after the break (scrape 15 s, rule evaluation about 1 min, a 5 m
+rate window, `for: 2m`). `PredictFallbackSlowBurn` was pending. Starting the container again at 12:34:02 brought
+the champion back in 7 seconds. This is the case the rejected alternative would have missed.
+
 ## What would show this was wrong
 
 - The page alert fires and, on looking, no rider was affected (the threshold is too sensitive), or riders

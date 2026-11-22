@@ -37,6 +37,13 @@ it. I also considered keeping only the nine metrics the dashboard uses: too litt
 - Cost of this choice: a metric I did not list is gone, for example a container's disk I/O or TCP statistics.
   Adding it back is one edit and a redeploy.
 
+## Evidence after three deploys and the break test (2026-11-22)
+
+The status workflow (Alloy's write-ahead log, an upper bound) showed 585 active series on the app host and 51 on
+the platform host: 636 in all, about 6% of 10,000. Before the three deploys the app host was at 481. The rise
+is the extra series from the blue and green containers and the stopped and restarted serving container, which
+stay in the log for up to two hours. Dashboard panels (hosts, containers, SLOs) kept their data throughout.
+
 ## What would show this was wrong
 
 - An incident where the answer was in a dropped family, and I could not see it.
