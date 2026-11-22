@@ -70,6 +70,7 @@ jobs:
       - name: Deploy the idle colour
         env:
           IDLE: ${{ steps.colours.outputs.idle }}
+          LLM_HOST: ${{ vars.LLM_HOST }}  # S6: the LLM host's private IP; compose.web.yaml passes it to the app
         run: |
           if [ "$IDLE" = blue ]; then other=green; else other=blue; fi
           new="sha-${HEAD_SHA::7}"  # the tag scheme from ci.yaml

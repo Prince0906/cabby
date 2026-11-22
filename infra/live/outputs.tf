@@ -30,3 +30,9 @@ output "artifact_bucket" {
 output "platform_private_ip" {
   value = module.host["platform"].private_ip
 }
+
+# S6: where the app and platform hosts reach the LLM host (chat 8080, embeddings 8081). Private address: the
+# LLM security group admits those ports from the app and platform groups only. Used for the LLM_HOST variable.
+output "llm_private_ip" {
+  value = module.host["llm"].private_ip
+}
