@@ -1,9 +1,16 @@
-# CD (S0): after CI succeeds on main, run the commit's image on the app host and smoke-test it.
+# CD (S0, blue-green from S3): after CI succeeds on main, put the commit's image on the idle colour, smoke-test
+# it, wait for a reviewer's approval, then switch traffic to it. The old colour keeps running (decision 011).
+#
+#   deploy (idle colour, no rider traffic) -> smoke test pinned to it -> ⏸ approval -> re-check -> switch -> check
 #
 # Runs on the app host's self-hosted runner (label lab-app), which uses the host's instance profile
-# and never runs for a pull request: this workflow is triggered only by a finished CI run, and the job
+# and never runs for a pull request: this workflow is triggered only by a finished CI run, and each job
 # checks that the run was a push (or a manual dispatch) on main of THIS repository, not a fork's PR.
 # Checks out the commit CI built, so the Compose file and the image always belong together.
+#
+# The switch job is in the `production` environment (required reviewer). While it waits, this run keeps the
+# `cd` concurrency slot, so a newer push queues behind it (only the newest queued run is kept). Approve or
+# reject the waiting run to let the next one start. Rollback without deploying: rollback.yaml.
 name: cd
 
 on:
@@ -17,7 +24,7 @@ permissions:
 
 concurrency:
   group: cd
-  cancel-in-progress: false  # let a running deploy finish; the next one queues behind it
+  cancel-in-progress: false  # never cut off a deploy or a switch half-way
 
 jobs:
   deploy:
@@ -31,6 +38,9 @@ jobs:
     permissions:
       contents: read
       packages: read  # pull the image CI pushed
+    outputs:
+      live: ${{ steps.colours.outputs.live }}
+      idle: ${{ steps.colours.outputs.idle }}
     env:
       HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
     steps:
@@ -42,30 +52,94 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: What is running now (the rollback target)
-        run: docker inspect --format '{{.Config.Image}}' lab-app-app-1 2>/dev/null || echo "nothing running yet"
-      - name: Deploy
+      - name: Prepare Traefik, routes and secrets
+        # The first run with this stack replaces S0's containers: about 15 s without traffic while Traefik changes config.
         run: |
+          echo "IMAGE_PREFIX=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
           export IMAGE_PREFIX="ghcr.io/${GITHUB_REPOSITORY,,}"
-          export IMAGE_TAG="sha-${HEAD_SHA::7}"  # the tag scheme from ci.yaml
-          docker compose -f deploy/compose.app.yaml pull
-          docker compose -f deploy/compose.app.yaml up -d --wait --remove-orphans
-          docker compose -f deploy/compose.app.yaml ps
-      - name: Smoke test through Traefik
+          deploy/web.sh prepare
+      - name: Pick the idle colour (the other one keeps running as the rollback target)
+        id: colours
         run: |
-          for _ in $(seq 1 20); do curl -fsS http://localhost/version >/dev/null && break; sleep 2; done
-          curl -fsS http://localhost/version | tee /dev/stderr | jq -e --arg sha "$HEAD_SHA" '.git_sha == $sha'
+          live=$(deploy/web.sh live)
+          if [ "$live" = blue ]; then idle=green; else idle=blue; fi
+          echo "live=$live" >> "$GITHUB_OUTPUT"
+          echo "idle=$idle" >> "$GITHUB_OUTPUT"
+          echo "live: $live, deploying to: $idle"
+          deploy/web.sh status
+      - name: Deploy the idle colour
+        env:
+          IDLE: ${{ steps.colours.outputs.idle }}
+        run: |
+          if [ "$IDLE" = blue ]; then other=green; else other=blue; fi
+          new="sha-${HEAD_SHA::7}"  # the tag scheme from ci.yaml
+          kept=$(deploy/web.sh tag "$other")
+          if [ "$IDLE" = blue ]; then export BLUE_TAG="$new" GREEN_TAG="$kept"; else export GREEN_TAG="$new" BLUE_TAG="$kept"; fi
+          docker compose -f deploy/compose.web.yaml pull "app-$IDLE"
+          docker compose -f deploy/compose.web.yaml up -d --wait --no-deps --remove-orphans "app-$IDLE"
+          docker compose -f deploy/compose.web.yaml ps
+      - name: Smoke test the idle colour (pinned to it, no rider traffic)
+        env:
+          IDLE: ${{ steps.colours.outputs.idle }}
+        run: |
+          deploy/web.sh smoke "$IDLE" "$HEAD_SHA"
           good='{"pickup_zone_id": 132, "dropoff_zone_id": 230, "pickup_datetime": "2024-03-08T17:05:00"}'
-          curl -fsS -X POST http://localhost/predict -H 'Content-Type: application/json' -d "$good" |
+          curl -fsS -X POST http://localhost/predict -H "X-Lab-Color: $IDLE" -H 'Content-Type: application/json' -d "$good" |
             jq -e '.duration_minutes > 0'
           bad='{"pickup_zone_id": 264, "dropoff_zone_id": 230, "pickup_datetime": "2024-03-08T17:05:00"}'
-          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost/predict -H 'Content-Type: application/json' -d "$bad")
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost/predict -H "X-Lab-Color: $IDLE" -H 'Content-Type: application/json' -d "$bad")
           [ "$code" = 422 ] || { echo "expected 422 for an invalid zone, got $code" >&2; exit 1; }
       - name: Show the stack when something failed
         if: failure()
         run: |
-          docker compose -f deploy/compose.app.yaml ps -a || true
-          docker compose -f deploy/compose.app.yaml logs --tail 40 || true
+          docker compose -f deploy/compose.web.yaml ps -a || true
+          docker compose -f deploy/compose.web.yaml logs --tail 40 || true
       - name: Remove the registry login from the host
         if: always()
         run: docker logout ghcr.io
+
+  switch:
+    needs: deploy
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: [self-hosted, lab-app]
+    environment: production  # a required reviewer approves here; GitHub records who and when
+    timeout-minutes: 10
+    env:
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      LIVE: ${{ needs.deploy.outputs.live }}
+      IDLE: ${{ needs.deploy.outputs.idle }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Re-check after the approval (it may have waited a long time)
+        run: |
+          now=$(deploy/web.sh live)
+          [ "$now" = "$LIVE" ] || { echo "live colour is $now, it was $LIVE when this build was tested: run CD again" >&2; exit 1; }
+          deploy/web.sh smoke "$IDLE" "$HEAD_SHA"  # the idle colour still runs the commit that was approved
+      - name: Switch
+        id: switch
+        run: deploy/web.sh switch "$IDLE"
+      - name: Check through the live path
+        run: |
+          for _ in $(seq 1 30); do
+            curl -fsS http://localhost/version | jq -e --arg sha "$HEAD_SHA" '.git_sha == $sha' >/dev/null && break
+            sleep 1
+          done
+          curl -fsS http://localhost/version | tee /dev/stderr | jq -e --arg sha "$HEAD_SHA" '.git_sha == $sha'
+          good='{"pickup_zone_id": 132, "dropoff_zone_id": 230, "pickup_datetime": "2024-03-08T17:05:00"}'
+          curl -fsS -X POST http://localhost/predict -H 'Content-Type: application/json' -d "$good" | jq -e '.duration_minutes > 0'
+          bad='{"pickup_zone_id": 264, "dropoff_zone_id": 230, "pickup_datetime": "2024-03-08T17:05:00"}'
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost/predict -H 'Content-Type: application/json' -d "$bad")
+          [ "$code" = 422 ] || { echo "expected 422 for an invalid zone, got $code" >&2; exit 1; }
+      - name: Summary
+        run: |
+          { echo "live is now $IDLE on ${HEAD_SHA::7}; $LIVE keeps running as the rollback target"; echo '```json'; deploy/web.sh status; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: If the live check failed
+        if: failure() && steps.switch.outcome == 'success'
+        run: |
+          echo "Traffic is on $IDLE. To go back to $LIVE without deploying, run the rollback workflow." | tee -a "$GITHUB_STEP_SUMMARY" >&2

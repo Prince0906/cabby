@@ -24,3 +24,9 @@ output "rds_endpoint" {
 output "artifact_bucket" {
   value = module.artifacts.name
 }
+
+# S3: where serving (on the app host) reaches MLflow. Private address: it only works inside the VPC, and the
+# platform security group admits port 5000 from the app host's group only (plus the notebook's, S2).
+output "platform_private_ip" {
+  value = module.host["platform"].private_ip
+}

@@ -1,0 +1,74 @@
+# Promote (S3): make a model version `champion`, behind a reviewer's approval. Manual only.
+#
+# The job runs in the `production` environment, which has a required reviewer: it waits until they approve,
+# and GitHub records who approved and when. It runs on the app host's runner, next to serving.
+# deploy/promote.py decides which versions may be promoted and moves the alias; this file approves, reloads
+# serving (decision 010: the old model keeps answering until the new one has loaded) and checks the result.
+# Rolling the model back is this same workflow with `version` set to the previous champion (S8).
+name: promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Model version to make champion. Empty: the current challenger."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: [self-hosted, lab-app]
+    environment: production
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Move the alias (refuses a version the pipeline didn't pass)
+        id: alias
+        run: |
+          out=$(docker exec -i -e "VERSION=$VERSION" lab-serving-serving-champion-1 python - < deploy/promote.py)
+          echo "$out"
+          echo "promoted=$(jq -r .promoted <<<"$out")" >> "$GITHUB_OUTPUT"
+          echo "previous=$(jq -r .previous_champion <<<"$out")" >> "$GITHUB_OUTPUT"
+      - name: Make serving use it
+        env:
+          PROMOTED: ${{ steps.alias.outputs.promoted }}
+        run: |
+          deploy/web.sh reload champion | tee /dev/stderr | jq -e --arg v "$PROMOTED" '.version == $v'
+          deploy/web.sh status | jq -e --arg v "$PROMOTED" '.serving.champion.version == $v'
+      - name: The app quotes with it
+        env:
+          PROMOTED: ${{ steps.alias.outputs.promoted }}
+        run: |
+          # Traefik's health check (5 s) lets the champion container back into rotation, so retry for a while.
+          good='{"pickup_zone_id": 132, "dropoff_zone_id": 230, "pickup_datetime": "2024-03-08T17:05:00"}'
+          for _ in $(seq 1 20); do
+            out=$(curl -fsS -X POST http://localhost/predict -H 'Content-Type: application/json' -d "$good" || true)
+            jq -e --arg v "$PROMOTED" '.duration_minutes > 0 and .model.alias == "champion" and .model.version == $v' <<<"$out" >/dev/null && break
+            sleep 3
+          done
+          echo "$out"
+          jq -e --arg v "$PROMOTED" '.duration_minutes > 0 and .model.alias == "champion" and .model.version == $v' <<<"$out"
+      - name: Summary
+        env:
+          PROMOTED: ${{ steps.alias.outputs.promoted }}
+          PREVIOUS: ${{ steps.alias.outputs.previous }}
+        run: |
+          echo "champion is now v$PROMOTED (outgoing champion: v$PREVIOUS, recorded as tag previous_champion on v$PROMOTED)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: If the alias moved but a check failed
+        if: failure()
+        env:
+          PROMOTED: ${{ steps.alias.outputs.promoted }}
+          PREVIOUS: ${{ steps.alias.outputs.previous }}
+        run: |
+          if [ -n "$PROMOTED" ]; then
+            echo "The alias already points at v$PROMOTED. To go back, run this workflow again with version=$PREVIOUS (if it was 'none', there was no champion before)." | tee -a "$GITHUB_STEP_SUMMARY" >&2
+          fi

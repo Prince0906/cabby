@@ -1,0 +1,44 @@
+# Rollback (S3): send app traffic back to the other colour, without deploying anything. Manual only.
+#
+# After a deploy both colours are running: the live one on the new commit, the other on the commit it replaced.
+# This switches to the other one if it still answers, and prints how long the switch took. No approval step:
+# the dispatch is already a human's decision, it returns to a colour that was live before, and during an
+# incident the approval would only add delay. (A model rollback is different: it goes through promote.yaml.)
+# Its own concurrency group, not cd's: a deploy waiting for approval holds cd's, and must not block a rollback.
+name: rollback
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rollback
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    runs-on: [self-hosted, lab-app]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Switch back to the other colour
+        run: |
+          live=$(deploy/web.sh live)
+          [ "$live" != none ] || { echo "no colour is live yet, nothing to roll back" >&2; exit 1; }
+          if [ "$live" = blue ]; then target=green; else target=blue; fi
+          tag=$(deploy/web.sh tag "$target")
+          [ "$tag" != none ] || { echo "$target isn't running, there is nothing to roll back to" >&2; exit 1; }
+          deploy/web.sh smoke "$target"  # it still answers, before any rider is sent there
+          want=$(curl -fsS -H "X-Lab-Color: $target" http://localhost/version | jq -r .git_sha)
+          start=$(date +%s.%N)
+          deploy/web.sh switch "$target"
+          for _ in $(seq 1 100); do
+            [ "$(curl -fsS http://localhost/version | jq -r .git_sha)" = "$want" ] && break
+            sleep 0.1
+          done
+          end=$(date +%s.%N)
+          [ "$(curl -fsS http://localhost/version | jq -r .git_sha)" = "$want" ] || { echo "traffic didn't reach $target" >&2; exit 1; }
+          took=$(awk -v s="$start" -v e="$end" 'BEGIN { printf "%.1f", e - s }')
+          echo "rolled back $live -> $target ($tag) in ${took}s, from the switch to the first rider request answered by it" | tee -a "$GITHUB_STEP_SUMMARY"
