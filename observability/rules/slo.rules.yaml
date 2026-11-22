@@ -2,4 +2,113 @@
 # Prometheus rule format: https://prometheus.io/docs/prometheus/latest/configuration/recording_rules/
 # Metric names are contracts/metrics.yaml's. `make check` runs promtool on this file and on any
 # *.test.yaml next to it.
-groups: []
+#
+# Two kinds of rule:
+#   recording: compute each SLI's "bad share" over 5m, 30m, 1h and 6h once, under a short name
+#   alerting:  compare those with a burn rate times the error budget (see observability/slo.yaml)
+#
+# Thresholds: budget 0.005 (99.5%) gives fast 14.4 x 0.005 = 0.072 and slow 6 x 0.005 = 0.03.
+#             budget 0.05 (95%, latency) gives fast 14.4 x 0.05 = 0.72 and slow 6 x 0.05 = 0.3.
+# A fast burn needs BOTH the 1h and the 5m window over the threshold: the long one says it is real, the
+# short one says it is still happening. A two-minute spike moves the 5m window but not the 1h one.
+# With no traffic the ratios have no value, so nothing fires: a total outage with zero requests is not
+# seen by these rules (the status workflow and health.sh cover that).
+groups:
+  - name: slo-predict-errors
+    rules:
+      - record: slo:predict_errors:ratio_rate5m
+        expr: |
+          (sum(rate(lab_http_requests_total{route="/predict", code=~"5.."}[5m])) or vector(0))
+          / sum(rate(lab_http_requests_total{route="/predict"}[5m]))
+      - record: slo:predict_errors:ratio_rate30m
+        expr: |
+          (sum(rate(lab_http_requests_total{route="/predict", code=~"5.."}[30m])) or vector(0))
+          / sum(rate(lab_http_requests_total{route="/predict"}[30m]))
+      - record: slo:predict_errors:ratio_rate1h
+        expr: |
+          (sum(rate(lab_http_requests_total{route="/predict", code=~"5.."}[1h])) or vector(0))
+          / sum(rate(lab_http_requests_total{route="/predict"}[1h]))
+      - record: slo:predict_errors:ratio_rate6h
+        expr: |
+          (sum(rate(lab_http_requests_total{route="/predict", code=~"5.."}[6h])) or vector(0))
+          / sum(rate(lab_http_requests_total{route="/predict"}[6h]))
+      - alert: PredictAvailabilityFastBurn
+        expr: slo:predict_errors:ratio_rate1h > 0.072 and slo:predict_errors:ratio_rate5m > 0.072
+        for: 2m
+        labels: {severity: page, slo: availability}
+        annotations:
+          summary: "/predict is burning its availability budget at 14x or more"
+          description: "More than 7.2% of /predict requests failed with a 5xx over both the last hour and the last 5 minutes."
+      - alert: PredictAvailabilitySlowBurn
+        expr: slo:predict_errors:ratio_rate6h > 0.03 and slo:predict_errors:ratio_rate30m > 0.03
+        for: 15m
+        labels: {severity: ticket, slo: availability}
+        annotations:
+          summary: "/predict is slowly burning its availability budget"
+          description: "More than 3% of /predict requests failed over both the last 6 hours and the last 30 minutes."
+
+  - name: slo-predict-latency
+    rules:
+      - record: slo:predict_slow:ratio_rate5m
+        expr: |
+          1 - (sum(rate(lab_http_request_duration_seconds_bucket{route="/predict", le="0.25"}[5m]))
+          / sum(rate(lab_http_request_duration_seconds_count{route="/predict"}[5m])))
+      - record: slo:predict_slow:ratio_rate30m
+        expr: |
+          1 - (sum(rate(lab_http_request_duration_seconds_bucket{route="/predict", le="0.25"}[30m]))
+          / sum(rate(lab_http_request_duration_seconds_count{route="/predict"}[30m])))
+      - record: slo:predict_slow:ratio_rate1h
+        expr: |
+          1 - (sum(rate(lab_http_request_duration_seconds_bucket{route="/predict", le="0.25"}[1h]))
+          / sum(rate(lab_http_request_duration_seconds_count{route="/predict"}[1h])))
+      - record: slo:predict_slow:ratio_rate6h
+        expr: |
+          1 - (sum(rate(lab_http_request_duration_seconds_bucket{route="/predict", le="0.25"}[6h]))
+          / sum(rate(lab_http_request_duration_seconds_count{route="/predict"}[6h])))
+      - alert: PredictLatencyFastBurn
+        expr: slo:predict_slow:ratio_rate1h > 0.72 and slo:predict_slow:ratio_rate5m > 0.72
+        for: 2m
+        labels: {severity: page, slo: latency}
+        annotations:
+          summary: "/predict is burning its latency budget at 14x or more"
+          description: "More than 72% of /predict requests took longer than 0.25 s over both the last hour and the last 5 minutes."
+      - alert: PredictLatencySlowBurn
+        expr: slo:predict_slow:ratio_rate6h > 0.3 and slo:predict_slow:ratio_rate30m > 0.3
+        for: 15m
+        labels: {severity: ticket, slo: latency}
+        annotations:
+          summary: "/predict is slowly burning its latency budget"
+          description: "More than 30% of /predict requests took longer than 0.25 s over both the last 6 hours and the last 30 minutes."
+
+  - name: slo-predict-model-answered
+    rules:
+      - record: slo:predict_fallback:ratio_rate5m
+        expr: |
+          (sum(rate(lab_predictions_total{source="fallback"}[5m])) or vector(0))
+          / sum(rate(lab_predictions_total[5m]))
+      - record: slo:predict_fallback:ratio_rate30m
+        expr: |
+          (sum(rate(lab_predictions_total{source="fallback"}[30m])) or vector(0))
+          / sum(rate(lab_predictions_total[30m]))
+      - record: slo:predict_fallback:ratio_rate1h
+        expr: |
+          (sum(rate(lab_predictions_total{source="fallback"}[1h])) or vector(0))
+          / sum(rate(lab_predictions_total[1h]))
+      - record: slo:predict_fallback:ratio_rate6h
+        expr: |
+          (sum(rate(lab_predictions_total{source="fallback"}[6h])) or vector(0))
+          / sum(rate(lab_predictions_total[6h]))
+      - alert: PredictFallbackFastBurn
+        expr: slo:predict_fallback:ratio_rate1h > 0.072 and slo:predict_fallback:ratio_rate5m > 0.072
+        for: 2m
+        labels: {severity: page, slo: model-answered}
+        annotations:
+          summary: "Riders are getting the static median instead of the model"
+          description: "More than 7.2% of quotes came from the fallback over both the last hour and the last 5 minutes. Serving may be down or has no champion."
+      - alert: PredictFallbackSlowBurn
+        expr: slo:predict_fallback:ratio_rate6h > 0.03 and slo:predict_fallback:ratio_rate30m > 0.03
+        for: 15m
+        labels: {severity: ticket, slo: model-answered}
+        annotations:
+          summary: "Some riders are getting the static median"
+          description: "More than 3% of quotes came from the fallback over both the last 6 hours and the last 30 minutes."

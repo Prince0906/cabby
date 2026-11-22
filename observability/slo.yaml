@@ -1,9 +1,24 @@
 # Service level objectives for the ride app (S5, decision 013). rules/slo.rules.yaml computes them.
 # One entry per SLO: what's measured (the SLI, from contracts/metrics.yaml), the objective, why that
 # number, and the alert that tells you it's being missed.
+#
+# Reading an objective: "99.5%" means 0.5% of requests may be bad, over 30 days. That 0.5% is the error
+# budget. A burn rate of 1 uses exactly the budget in 30 days; 14.4 uses 2% of it in one hour.
 slos:
   - name: predict-availability
-    sli:
-    objective:
-    why:
-    alert:
+    sli: share of /predict requests that are not 5xx (lab_http_requests_total{route="/predict"}); 4xx, like a 422 for an invalid zone, is the caller's mistake and does not count
+    objective: 99.5% over 30 days (0.5% budget, about 3.6 hours of failure)
+    why: a rider who gets an error gets no quote at all. 99.5% is strict enough to mean something and leaves room for a deploy gap and my own break test. 99.9% would be burned by a few minutes of trouble.
+    alert: PredictAvailabilityFastBurn pages (burn rate 14.4 over 1h and 5m, for 2m); PredictAvailabilitySlowBurn opens a ticket (burn rate 6 over 6h and 30m, for 15m)
+
+  - name: predict-latency
+    sli: share of /predict requests answered in under 0.25 s (lab_http_request_duration_seconds, le="0.25")
+    objective: 95% over 30 days (5% budget)
+    why: the app waits 300 ms for serving and then falls back to the static median, so 0.25 s means the model had time to answer. 95% (not 99.5%) because a percentile of latency is noisier than an error count, and a cold request is allowed to be slow.
+    alert: PredictLatencyFastBurn pages (burn rate 14.4 over 1h and 5m, for 2m, which is 72% of requests slow); PredictLatencySlowBurn opens a ticket (burn rate 6 over 6h and 30m, for 15m)
+
+  - name: predict-model-answered
+    sli: share of quotes that came from the model, not the static median (lab_predictions_total, source="model" vs "fallback")
+    objective: 99.5% over 30 days (0.5% budget)
+    why: when serving is down the app still answers HTTP 200, so availability stays green while every rider gets the 12-minute median. Only this SLI sees it.
+    alert: PredictFallbackFastBurn pages (burn rate 14.4 over 1h and 5m, for 2m); PredictFallbackSlowBurn opens a ticket (burn rate 6 over 6h and 30m, for 15m)

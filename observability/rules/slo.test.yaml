@@ -1,0 +1,100 @@
+# promtool unit tests for slo.rules.yaml (S5). `make check` and the observability workflow run them.
+# Each series is one counter sampled once a minute. "0+60x60" means: start at 0 and add 60 each minute for
+# 60 more minutes, so 60 requests a minute.
+rule_files:
+  - slo.rules.yaml
+evaluation_interval: 1m
+
+tests:
+  # An outage pages: an hour of healthy traffic, then every request fails with a 500.
+  - name: availability outage pages
+    interval: 1m
+    input_series:
+      - series: 'lab_http_requests_total{route="/predict", code="200"}'
+        values: '0+60x60 3600+0x20'
+      - series: 'lab_http_requests_total{route="/predict", code="500"}'
+        values: '0+0x60 0+60x20'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: PredictAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: PredictAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: availability
+            exp_annotations:
+              summary: "/predict is burning its availability budget at 14x or more"
+              description: "More than 7.2% of /predict requests failed with a 5xx over both the last hour and the last 5 minutes."
+
+  # A short spike does not page: two minutes of errors on top of steady traffic. The 5m window is over the
+  # threshold, the 1h window is not, and a fast burn needs both.
+  - name: availability short spike does not page
+    interval: 1m
+    input_series:
+      - series: 'lab_http_requests_total{route="/predict", code="200"}'
+        values: '0+60x90'
+      - series: 'lab_http_requests_total{route="/predict", code="500"}'
+        values: '0+0x60 60 120 120+0x28'
+    alert_rule_test:
+      - eval_time: 63m
+        alertname: PredictAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: PredictAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: PredictAvailabilityFastBurn
+        exp_alerts: []
+
+  # Serving goes down: the app still answers 200, but every quote comes from the fallback. Availability
+  # stays green; this SLO is the one that pages.
+  - name: fallback outage pages
+    interval: 1m
+    input_series:
+      - series: 'lab_predictions_total{source="model", alias="champion", version="1"}'
+        values: '0+60x60 3600+0x20'
+      - series: 'lab_predictions_total{source="fallback", alias="", version=""}'
+        values: '0+0x60 0+60x20'
+      - series: 'lab_http_requests_total{route="/predict", code="200"}'
+        values: '0+60x80'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: PredictFallbackFastBurn
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: PredictFallbackFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: model-answered
+            exp_annotations:
+              summary: "Riders are getting the static median instead of the model"
+              description: "More than 7.2% of quotes came from the fallback over both the last hour and the last 5 minutes. Serving may be down or has no champion."
+      - eval_time: 70m
+        alertname: PredictAvailabilityFastBurn
+        exp_alerts: []
+
+  # Slow answers page too, but a 95% objective needs 72% of requests slow for a whole hour, so the outage
+  # here runs for an hour: requests keep arriving but none finishes under 0.25 s.
+  - name: latency outage pages
+    interval: 1m
+    input_series:
+      - series: 'lab_http_request_duration_seconds_bucket{route="/predict", le="0.25"}'
+        values: '0+60x60 3600+0x80'
+      - series: 'lab_http_request_duration_seconds_count{route="/predict"}'
+        values: '0+60x140'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: PredictLatencyFastBurn
+        exp_alerts: []
+      - eval_time: 130m
+        alertname: PredictLatencyFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: latency
+            exp_annotations:
+              summary: "/predict is burning its latency budget at 14x or more"
+              description: "More than 72% of /predict requests took longer than 0.25 s over both the last hour and the last 5 minutes."
